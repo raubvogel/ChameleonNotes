@@ -1,0 +1,149 @@
+# Three hosts
+# This is a YAML file. 
+
+# This describes what is deployed by this template.
+description: >
+   HOT Template to create a user-defined private network and then 
+   build 3 servers (external_server, second_server, third_server) inside it, 
+   one of which has external access.
+
+   As it stands, external_server has to wait for second_server and
+   third_server to be up before it is open for business.
+# This defines the minimum Heat version required by this template.
+heat_template_version: 2015-10-15
+
+# The parameters section gathers configuration from the user. 
+# It does not have to be in the beginning or the end of the document.
+# Variables you can edit are defined here.
+parameters:
+  key_name:
+    type: string
+    description: Name of a KeyPair to enable SSH access to the instance
+    default: default
+    constraints:
+    - custom_constraint: nova.keypair
+  reservation_id:
+    # We have no default for this one
+    type: string
+    description: ID of the Blazar reservation to use for launching instances.
+    constraints:
+    - custom_constraint: blazar.reservation
+  image_name:
+    type: string
+    label: Image Name
+    description: Image to be used by this instance (CentOS/RedHat/Fedora)
+    default: CC-CentOS7
+  flavor_name:
+    type: string
+    label: Flavor Name
+    description: Flavor of the instance we are building (baremetal, kvm, etc)
+    default: baremetal
+  private_network_name:
+    type: string
+    label: Private Network Name
+    description: Private network used by this instance
+    default: my_network
+  ip_subnet:
+    label: Subnet in cidr
+    type: string
+    description: Cidr of the private network
+    default: 192.168.100.0/24
+
+# The resources section defines which OpenStack resources are to be deployed and
+# how they should be configured. In this example, we will deploy 2 servers
+# with iperf in each of them and then use a third to access them
+resources:
+  private_network:
+    type: OS::Neutron::Net
+    properties:
+      name: { get_param: private_network_name }
+
+  private_subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      name: subnet
+      cidr: { get_param: ip_subnet }
+      network_id: { get_resource: private_network }
+      # gateway_ip: { get_param: private_net_gateway }
+      enable_dhcp: true
+
+  router_interface:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router: { get_resource: router_to_ext }
+      subnet: { get_resource: private_subnet }
+
+  router_to_ext:
+    type: OS::Neutron::Router
+    properties:
+      name: router
+      external_gateway_info:
+        network: public
+
+  # Server we will use to connect from public network
+  ext_server_floating_ip:
+    type: OS::Nova::FloatingIP
+    properties:
+      pool: public
+
+  ext_server:
+    type: OS::Nova::Server
+    properties:
+      flavor: { get_param: flavor_name }
+      image: { get_param: image_name }
+      key_name: { get_param: key_name }
+      networks:
+        - network: { get_resource: private_network }
+      scheduler_hints: { reservation: { get_param: reservation_id } }
+      # This script is run once this server/instance is built
+      user_data: 
+        str_replace:
+          template: |
+            #!/bin/sh
+            echo "$second_server_ip second_server" >> /etc/hosts
+            echo "$third_server_ip third_server" >> /etc/hosts
+          params:
+            $second_server_ip: { get_attr: [ second_server, first_address ] }
+            $third_server_ip: { get_attr: [ third_server, first_address ] }
+
+  ext_server_ip_association:
+    type: OS::Neutron::FloatingIPAssociation
+    # These properties can be used later
+    properties:
+      floatingip_id: {get_resource: ext_server_floating_ip}
+      port_id: {get_attr: [ext_server, addresses, { get_param: private_network_name }, 0, port]}
+
+  # Let's now create the other two servers that are not externally-facing
+  second_server:
+    type: OS::Nova::Server
+    properties:
+      flavor: { get_param: flavor_name }
+      image: { get_param: image_name }
+      key_name: { get_param: key_name }
+      networks:
+        - network: { get_resource: private_network }
+      scheduler_hints: { reservation: { get_param: reservation_id } }
+      # This script is run once this server/instance is built
+
+
+  third_server:
+    type: OS::Nova::Server
+    properties:
+      flavor: { get_param: flavor_name }
+      image: { get_param: image_name }
+      key_name: { get_param: key_name }
+      networks:
+        - network: { get_resource: private_network }
+      scheduler_hints: { reservation: { get_param: reservation_id } }
+      # This script is run once this server/instance is built
+
+outputs:
+  second_server_private_ip:
+    description: Private IP address for second_server
+    value: { get_attr: [ second_server, first_address ] }
+  third_server_private_ip:
+    description: Private IP address for third_server
+    value: { get_attr: [ third_server, first_address ] }
+  ext_server_private_ip:
+    description: Private IP address for externally facing server
+    value: { get_attr: [ ext_server, first_address ] }
